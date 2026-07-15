@@ -2,9 +2,12 @@
 # Serves market/news data AND the dashboard page from one origin.
 # The dashboard is same-origin with the API, so no CORS / no sandbox issues.
 
+import json
 import os
+from pathlib import Path
+
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -13,7 +16,7 @@ app = FastAPI(title="APEX Insights API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -28,6 +31,33 @@ APEX_BASE = os.environ.get("APEX_BASE", "https://apex-production-b5bc.up.railway
 
 APEX_PAIRS = ["USDJPY", "GBPJPY", "CADJPY", "AUDJPY", "NZDJPY",
               "EURUSD", "GBPUSD", "AUDUSD", "NZDUSD"]
+
+# ── persistent storage ───────────────────────────────────────────────
+# IMPORTANT: this Railway service's filesystem is ephemeral by default —
+# whatever is written here survives between requests but is WIPED on the
+# next deploy, UNLESS a persistent volume is attached and mounted at this
+# path. Set PNL_DATA_DIR to that volume's mount path in Railway once it's
+# attached (matches the pattern the main APEX backend already uses).
+DATA_DIR = Path(os.environ.get("PNL_DATA_DIR", "data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+PNL_FILE = DATA_DIR / "pnl_calendar.json"
+
+
+def _load_pnl() -> dict:
+    if not PNL_FILE.exists():
+        return {}
+    try:
+        with open(PNL_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_pnl(data: dict) -> None:
+    tmp = str(PNL_FILE) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, str(PNL_FILE))
 
 
 # ── data endpoints ───────────────────────────────────────────────────
@@ -95,6 +125,38 @@ async def macro_rates():
             obs = r.json().get("observations", [{}])
             out[name] = obs[0] if obs else None
     return out
+
+
+# ── P&L calendar (manually logged, persisted server-side) ────────────
+@app.get("/api/pnl")
+def pnl_get():
+    """Return every logged day: {"2026-07-15": 237.0, ...}."""
+    return _load_pnl()
+
+
+@app.post("/api/pnl")
+def pnl_set(payload: dict = Body(...)):
+    """
+    Upsert one day's P&L. Body: {"date": "YYYY-MM-DD", "amount": 237.0}.
+    Passing amount as null removes that day's entry (for corrections).
+    Returns the full updated calendar.
+    """
+    date = str(payload.get("date", "")).strip()
+    if not date:
+        return JSONResponse(content={"error": "date is required"}, status_code=400)
+
+    data = _load_pnl()
+    amount = payload.get("amount", None)
+    if amount is None:
+        data.pop(date, None)
+    else:
+        try:
+            data[date] = float(amount)
+        except (TypeError, ValueError):
+            return JSONResponse(content={"error": "amount must be a number"}, status_code=400)
+
+    _save_pnl(data)
+    return data
 
 
 # ── backtest proxy (server-side; keeps the live trader untouched) ────
