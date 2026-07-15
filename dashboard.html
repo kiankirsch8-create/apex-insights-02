@@ -111,6 +111,30 @@
   .warn{color:var(--amber);font-size:11px}
   .foot{font-family:var(--mono);font-size:9.5px;color:var(--faint);text-align:center;margin-top:24px;letter-spacing:.4px}
 
+  /* pnl calendar */
+  .pnl-top{display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:14px}
+  .pnl-total-v{font-family:var(--mono);font-size:26px;font-weight:700;line-height:1;margin-top:7px}
+  .pnl-add{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  .pnl-add input{font-family:var(--mono);font-size:12px;padding:8px 10px;border-radius:9px;background:var(--card2);border:1px solid var(--edge);color:var(--ink);outline:none}
+  .pnl-add input[type=date]{width:132px}
+  .pnl-add input[type=number]{width:100px}
+  .cal-nav{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:12px}
+  .cal-nav button{background:none;border:1px solid var(--edge);color:var(--dim);border-radius:8px;width:26px;height:26px;cursor:pointer}
+  .cal-nav button:hover{color:var(--ink);border-color:var(--faint)}
+  .cal-label{min-width:108px;text-align:center;color:var(--ink);font-weight:600}
+  .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:12px}
+  .cal-head{font-family:var(--mono);font-size:9.5px;color:var(--faint);text-align:center;letter-spacing:.4px;padding-bottom:2px}
+  .cal-cell{aspect-ratio:1/1;border-radius:9px;border:1px solid var(--edge);padding:6px;cursor:pointer;display:flex;flex-direction:column;justify-content:space-between;transition:.12s}
+  .cal-cell:hover{border-color:var(--faint)}
+  .cal-cell.empty-slot{border:none;cursor:default}
+  .cal-cell.up{background:rgba(52,226,155,.12);border-color:rgba(52,226,155,.35)}
+  .cal-cell.dn{background:rgba(255,91,110,.12);border-color:rgba(255,91,110,.35)}
+  .cal-cell.today{box-shadow:inset 0 0 0 1.5px var(--sky)}
+  .cal-daynum{font-family:var(--mono);font-size:10.5px;color:var(--dim)}
+  .cal-amt{font-family:var(--mono);font-size:10.5px;font-weight:700;text-align:right}
+  .cal-cell.up .cal-amt{color:var(--green)}
+  .cal-cell.dn .cal-amt{color:var(--red)}
+
   @media(max-width:980px){ .grid{grid-template-columns:1fr} .kpis{grid-template-columns:1fr 1fr} .side{display:none} }
 </style>
 </head>
@@ -230,6 +254,30 @@
           <div class="muted" style="font-size:9.5px;margin-top:8px;color:var(--faint)">Ask Claude to interpret any headline for APEX.</div>
         </div>
       </div>
+    </div>
+
+    <!-- P&L calendar -->
+    <div class="card" style="margin-top:16px">
+      <div class="pnl-top">
+        <div>
+          <div class="eyebrow" style="color:var(--green)">P&amp;L Calendar</div>
+          <div class="pnl-total-v" id="pnl_total">···</div>
+          <div class="hero-meta" id="pnl_meta"></div>
+        </div>
+        <div class="pnl-add">
+          <input type="date" id="pnl_date" />
+          <input type="number" step="0.01" id="pnl_amount" placeholder="e.g. 237 or -40" />
+          <button class="go" onclick="logPnl()">Log</button>
+        </div>
+      </div>
+      <div class="cal-nav">
+        <button onclick="calShift(-1)">‹</button>
+        <span class="cal-label" id="cal_label">···</span>
+        <button onclick="calShift(1)">›</button>
+      </div>
+      <div class="cal-grid" id="cal_head"></div>
+      <div class="cal-grid" id="cal_grid" style="margin-top:4px"></div>
+      <div class="muted" style="font-size:9.5px;margin-top:10px;color:var(--faint)">Click any day to log or correct it. Green = profit, red = loss.</div>
     </div>
 
     <div class="foot">APEX COMMAND CENTER · equity curve reconstructed from daily_pnl · backtest figures are frictionless simulation · not financial advice</div>
@@ -465,8 +513,99 @@ function renderTasks(){
   document.getElementById("todo_list").innerHTML=html||'<div class="muted">No tasks yet.</div>';
 }
 
+/* ── P&L calendar (persisted server-side via /api/pnl) ── */
+let _pnl = {};
+const _today = new Date();
+let _calY = _today.getFullYear(), _calM = _today.getMonth(); // 0-indexed month
+const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+const DOW = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+
+function ymd(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+
+document.getElementById("pnl_date").value = ymd(_today);
+
+async function loadPnl(){
+  try{
+    _pnl = await fetch("/api/pnl").then(r=>r.json());
+  }catch(e){ _pnl = {}; }
+  renderPnlTotal();
+  renderCalendar();
+}
+
+function renderPnlTotal(){
+  const vals = Object.values(_pnl).map(Number).filter(n=>!isNaN(n));
+  const total = vals.reduce((s,v)=>s+v,0);
+  const el = document.getElementById("pnl_total");
+  el.textContent = (total>=0?"+":"") + total.toFixed(2) + " €";
+  el.style.color = total>=0 ? "var(--green)" : "var(--red)";
+  const days = vals.length;
+  const wins = vals.filter(v=>v>0).length;
+  document.getElementById("pnl_meta").textContent = days
+    ? `${days} day${days!==1?"s":""} logged · ${wins}W/${days-wins}L`
+    : "No days logged yet.";
+}
+
+function calShift(dir){
+  _calM += dir;
+  if(_calM<0){ _calM=11; _calY--; }
+  if(_calM>11){ _calM=0; _calY++; }
+  renderCalendar();
+}
+
+function renderCalendar(){
+  document.getElementById("cal_label").textContent = MONTH_NAMES[_calM] + " " + _calY;
+
+  const headEl = document.getElementById("cal_head");
+  headEl.innerHTML = DOW.map(d=>`<div class="cal-head">${d}</div>`).join("");
+
+  const first = new Date(_calY, _calM, 1);
+  const startOffset = (first.getDay()+6)%7; // Mon=0
+  const daysInMonth = new Date(_calY, _calM+1, 0).getDate();
+  const todayStr = ymd(_today);
+
+  let cells = "";
+  for(let i=0;i<startOffset;i++) cells += `<div class="cal-cell empty-slot"></div>`;
+  for(let day=1; day<=daysInMonth; day++){
+    const dateStr = _calY+"-"+String(_calM+1).padStart(2,"0")+"-"+String(day).padStart(2,"0");
+    const amt = _pnl[dateStr];
+    const hasAmt = amt!=null && !isNaN(amt);
+    const cls = hasAmt ? (Number(amt)>=0?"up":"dn") : "";
+    const isToday = dateStr===todayStr ? "today" : "";
+    cells += `<div class="cal-cell ${cls} ${isToday}" onclick="pickDay('${dateStr}')">
+      <span class="cal-daynum">${day}</span>
+      ${hasAmt ? `<span class="cal-amt">${Number(amt)>=0?"+":""}${Number(amt).toFixed(0)}</span>` : ""}
+    </div>`;
+  }
+  document.getElementById("cal_grid").innerHTML = cells;
+}
+
+function pickDay(dateStr){
+  document.getElementById("pnl_date").value = dateStr;
+  const existing = _pnl[dateStr];
+  document.getElementById("pnl_amount").value = existing!=null ? existing : "";
+  document.getElementById("pnl_amount").focus();
+}
+
+async function logPnl(){
+  const date = document.getElementById("pnl_date").value;
+  const raw = document.getElementById("pnl_amount").value;
+  if(!date){ return; }
+  const amount = raw.trim()==="" ? null : parseFloat(raw);
+  if(raw.trim()!=="" && isNaN(amount)){ return; }
+  try{
+    _pnl = await fetch("/api/pnl", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({date, amount}),
+    }).then(r=>r.json());
+    document.getElementById("pnl_amount").value = "";
+    renderPnlTotal();
+    renderCalendar();
+  }catch(e){ /* silent — next refresh will retry */ }
+}
+
 /* sync */
-function syncAll(){ loadBacktest(document.getElementById("jobInput").value.trim()||"active"); loadEngine(); loadForex(); loadNews(); loadMacro(); }
+function syncAll(){ loadBacktest(document.getElementById('jobInput').value.trim()||"active"); loadEngine(); loadForex(); loadNews(); loadMacro(); loadPnl(); }
 
 /* init */
 renderTasks();
@@ -475,6 +614,7 @@ loadEngine();
 loadForex();
 loadNews();
 loadMacro();
+loadPnl();
 </script>
 </body>
 </html>
